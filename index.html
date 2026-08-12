@@ -183,6 +183,8 @@
   .day-cell.compact{min-height:66px; padding:6px;}
   .day-cell.outside{opacity:.32;}
   .day-cell.today{border-color:var(--red);}
+  .day-cell.drag-over{border-color:var(--red); background:rgba(230,48,39,.12);}
+  .evt-chip.dragging{opacity:.35;}
   .day-cell:hover .add-day-btn{opacity:1;}
   .day-num{font-size:14px; font-weight:600; color:var(--text-1);}
   .day-cell.compact .day-num{font-size:12px;}
@@ -196,7 +198,7 @@
   .day-events{display:flex; flex-direction:column; gap:4px; overflow:hidden;}
   .evt-chip{
     font-size:11px; font-weight:600; padding:3px 6px; border-radius:5px;
-    border-left:3px solid var(--resultado); color:var(--text-0); cursor:pointer;
+    border-left:3px solid var(--resultado); color:var(--text-0); cursor:grab;
     white-space:nowrap; overflow:hidden; text-overflow:ellipsis;
   }
   .day-cell.compact .evt-chip{font-size:9.5px; padding:2px 4px;}
@@ -333,6 +335,10 @@
 
   <div class="filters-row" id="filtersRow">
     <span class="filters-label">Tipo de Ação:</span>
+  </div>
+
+  <div class="filters-row" id="tagFiltersRow">
+    <span class="filters-label">Tags:</span>
   </div>
 
   <div class="cal-controls">
@@ -492,6 +498,11 @@
       </div>
 
       <div class="form-group">
+        <label>Tag especial (opcional)</label>
+        <div class="pill-select" id="resetCulturalToggle"></div>
+      </div>
+
+      <div class="form-group">
         <label>Repetição</label>
         <select id="fFrequencia">
           <option value="unica">Não se repete</option>
@@ -609,8 +620,10 @@ let viewedMonth = new Date().getMonth();
 let viewedYear = new Date().getFullYear();
 let weekAnchor = new Date();
 let activeCategoria = "todos";
+let activeTagResetCultural = false;
 let currentViewedId = null;
 let currentViewedDate = null;
+let dragPayload = null;
 
 /* =====================================================================
    HELPERS DE DATA
@@ -715,11 +728,75 @@ function getAllOccurrencesInRange(rangeStart, rangeEnd, filterCategoria){
   const out = [];
   Object.entries(actions).forEach(([id, a])=>{
     if(filterCategoria && filterCategoria!=="todos" && a.categoria !== filterCategoria) return;
+    if(activeTagResetCultural && !a.resetCultural) return;
     const occs = getOccurrences(a, rangeStart, rangeEnd);
     occs.forEach(o => out.push({id, action:a, date:o.date, dayIndex:o.dayIndex, totalDays:o.totalDays}));
   });
   out.sort((x,y)=> x.date - y.date);
   return out;
+}
+
+/* =====================================================================
+   ARRASTAR E SOLTAR (reagendar ações no calendário)
+===================================================================== */
+function shiftISO(iso, deltaDays){
+  const d = parseISO(iso);
+  d.setDate(d.getDate() + deltaDays);
+  return toISO(d);
+}
+function daysBetweenISO(isoA, isoB){
+  return Math.round((parseISO(isoB) - parseISO(isoA)) / 86400000);
+}
+
+function attachDragSource(chip, o){
+  chip.draggable = true;
+  chip.addEventListener("dragstart", (e)=>{
+    dragPayload = {id:o.id, occDateIso: toISO(o.date)};
+    chip.classList.add("dragging");
+    if(e.dataTransfer){ e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", o.id); }
+  });
+  chip.addEventListener("dragend", ()=>{ chip.classList.remove("dragging"); });
+}
+
+function attachDropTarget(cell, iso){
+  cell.addEventListener("dragover", (e)=>{
+    if(!dragPayload) return;
+    e.preventDefault();
+    cell.classList.add("drag-over");
+  });
+  cell.addEventListener("dragleave", ()=>{ cell.classList.remove("drag-over"); });
+  cell.addEventListener("drop", (e)=>{
+    e.preventDefault();
+    cell.classList.remove("drag-over");
+    if(!dragPayload) return;
+    const delta = daysBetweenISO(dragPayload.occDateIso, iso);
+    rescheduleAction(dragPayload.id, delta);
+    dragPayload = null;
+  });
+}
+
+function rescheduleAction(id, deltaDays){
+  const a = actions[id];
+  if(!a || !deltaDays) return;
+
+  if(a.frequencia !== "unica"){
+    const proceed = confirm(
+      `"${a.titulo}" se repete (${FREQ_LABEL[a.frequencia]}). Arrastar vai deslocar TODAS as ocorrências desta ação em ${deltaDays>0?"+":""}${deltaDays} dia(s). Deseja continuar?`
+    );
+    if(!proceed) return;
+  }
+
+  const newData = shiftISO(a.data, deltaDays);
+  const newDataFim = a.dataFim ? shiftISO(a.dataFim, deltaDays) : null;
+  const payload = {data:newData, dataFim:newDataFim, updatedAt:Date.now()};
+
+  if(!firebaseOk){
+    actions[id] = {...actions[id], ...payload};
+    renderAll();
+  }else{
+    db.ref(DB_PATH + "/" + id).update(payload);
+  }
+  logHistory("edicao", a.titulo, `Data alterada por arraste: ${fmtBR(parseISO(a.data))} → ${fmtBR(parseISO(newData))}`);
 }
 
 /* =====================================================================
@@ -764,6 +841,22 @@ function renderFilters(){
     chip.onclick = ()=>{ activeCategoria = cat; renderAll(); };
     row.appendChild(chip);
   });
+}
+
+function renderTagFilters(){
+  const row = document.getElementById("tagFiltersRow");
+  row.querySelectorAll(".chip").forEach(c=>c.remove());
+
+  const chip = document.createElement("div");
+  chip.className = "chip" + (activeTagResetCultural ? " active":"");
+  chip.style.setProperty("--chip-color", "#FFD166");
+  const dot = document.createElement("span");
+  dot.className = "chip-dot";
+  dot.style.background = activeTagResetCultural ? "#fff" : "#FFD166";
+  chip.appendChild(dot);
+  chip.appendChild(document.createTextNode("Reset Cultural"));
+  chip.onclick = ()=>{ activeTagResetCultural = !activeTagResetCultural; renderAll(); };
+  row.appendChild(chip);
 }
 
 /* =====================================================================
@@ -835,6 +928,8 @@ function buildMonthGrid(year, month, opts){
 
     const cell = document.createElement("div");
     cell.className = "day-cell" + (isOutside ? " outside":"") + (isToday ? " today":"") + (opts.compact ? " compact":"");
+    cell.dataset.iso = iso;
+    attachDropTarget(cell, iso);
 
     const num = document.createElement("div");
     num.className = "day-num";
@@ -860,8 +955,9 @@ function buildMonthGrid(year, month, opts){
       const color = CATEGORIA_COLOR[o.action.categoria] || "var(--resultado)";
       chip.style.borderLeftColor = color;
       chip.style.background = color + "1f";
-      chip.textContent = actionDisplayTitle(o.action, o.dayIndex, o.totalDays);
+      chip.textContent = (o.action.resetCultural ? "★ " : "") + actionDisplayTitle(o.action, o.dayIndex, o.totalDays);
       chip.onclick = ()=> openViewModal(o.id, o.date, o.dayIndex, o.totalDays);
+      attachDragSource(chip, o);
       evWrap.appendChild(chip);
     });
     if(dayOccs.length > maxShow){
@@ -909,6 +1005,8 @@ function buildWeekGrid(anchor){
     const isToday = iso === todayISO;
     const cell = document.createElement("div");
     cell.className = "day-cell week-mode" + (isToday ? " today":"");
+    cell.dataset.iso = iso;
+    attachDropTarget(cell, iso);
 
     const num = document.createElement("div");
     num.className = "day-num";
@@ -932,8 +1030,9 @@ function buildWeekGrid(anchor){
       const color = CATEGORIA_COLOR[o.action.categoria] || "var(--resultado)";
       chip.style.borderLeftColor = color;
       chip.style.background = color + "1f";
-      chip.textContent = actionDisplayTitle(o.action, o.dayIndex, o.totalDays);
+      chip.textContent = (o.action.resetCultural ? "★ " : "") + actionDisplayTitle(o.action, o.dayIndex, o.totalDays);
       chip.onclick = ()=> openViewModal(o.id, o.date, o.dayIndex, o.totalDays);
+      attachDragSource(chip, o);
       evWrap.appendChild(chip);
     });
     cell.appendChild(evWrap);
@@ -1039,7 +1138,7 @@ function renderActionsList(){
         dot.style.background = CATEGORIA_COLOR[o.action.categoria] || "var(--resultado)";
         const copy = document.createElement("div");
         copy.className = "qt-item-copy";
-        copy.innerHTML = `<div class="qt-date">${fmtBR(o.date)} · ${escapeHtml(o.action.responsavel||"")}</div><div class="qt-title">${escapeHtml(actionDisplayTitle(o.action, o.dayIndex, o.totalDays))}</div>`;
+        copy.innerHTML = `<div class="qt-date">${fmtBR(o.date)} · ${escapeHtml(o.action.responsavel||"")}</div><div class="qt-title">${o.action.resetCultural ? "★ " : ""}${escapeHtml(actionDisplayTitle(o.action, o.dayIndex, o.totalDays))}</div>`;
         item.appendChild(dot); item.appendChild(copy);
         col.appendChild(item);
       });
@@ -1076,6 +1175,7 @@ function renderLegend(){
 
 function renderAll(){
   renderFilters();
+  renderTagFilters();
   renderHeaderLabel();
   renderStats();
   renderCalendarArea();
@@ -1167,6 +1267,15 @@ function openViewModal(id, occDate, dayIndex, totalDays){
     badgeRow.appendChild(b);
   });
 
+  if(a.resetCultural){
+    const rcBadge = document.createElement("div");
+    rcBadge.className = "badge";
+    rcBadge.style.background = "#FFD166";
+    rcBadge.style.color = "#1a1400";
+    rcBadge.textContent = "Reset Cultural";
+    badgeRow.appendChild(rcBadge);
+  }
+
   const comFieldsWrap = document.getElementById("vComunicacaoFields");
   if(a.categoria === "Comunicação" && (a.linhaEditorial || (a.canais && a.canais.length))){
     document.getElementById("vLinhaEditorial").textContent = a.linhaEditorial || "—";
@@ -1198,6 +1307,7 @@ let selectedCategoria = "Ritual";
 let selectedPrincipios = [];
 let selectedLinhaEditorial = null;
 let selectedCanais = [];
+let selectedResetCultural = false;
 
 function buildResponsavelSelect(){
   const sel = document.getElementById("fResponsavel");
@@ -1339,6 +1449,32 @@ function updateCanaisSelector(){
   });
 }
 
+function buildResetCulturalToggle(){
+  const wrap = document.getElementById("resetCulturalToggle");
+  wrap.innerHTML = "";
+  const opt = document.createElement("div");
+  opt.className = "pill-opt";
+  opt.textContent = "Reset Cultural";
+  opt.onclick = ()=>{ selectedResetCultural = !selectedResetCultural; updateResetCulturalToggle(); };
+  wrap.appendChild(opt);
+  updateResetCulturalToggle();
+}
+function updateResetCulturalToggle(){
+  const el = document.querySelector("#resetCulturalToggle .pill-opt");
+  if(!el) return;
+  if(selectedResetCultural){
+    el.classList.add("selected");
+    el.style.background = "#FFD166";
+    el.style.borderColor = "#FFD166";
+    el.style.color = "#1a1400";
+  }else{
+    el.classList.remove("selected");
+    el.style.background = "var(--bg-2)";
+    el.style.borderColor = "var(--border)";
+    el.style.color = "";
+  }
+}
+
 const freqHints = {
   unica:"Evento pontual, ocorre só nesta data.",
   semanal:"Repete a cada 7 dias a partir da data de início, no mesmo dia da semana.",
@@ -1361,6 +1497,7 @@ function openFormModal(id, presetDateISO){
   buildPrincipiosSelector();
   buildLinhaEditorialSelector();
   buildCanaisSelector();
+  buildResetCulturalToggle();
 
   if(isEdit){
     const a = actions[id];
@@ -1382,6 +1519,8 @@ function openFormModal(id, presetDateISO){
     selectedCanais = Array.isArray(a.canais) ? a.canais.slice() : [];
     updateCanaisSelector();
     toggleComunicacaoFields();
+    selectedResetCultural = !!a.resetCultural;
+    updateResetCulturalToggle();
 
     const endType = a.endType || "never";
     document.querySelector(`input[name=endType][value=${endType}]`).checked = true;
@@ -1404,6 +1543,8 @@ function openFormModal(id, presetDateISO){
     selectedCanais = [];
     updateCanaisSelector();
     toggleComunicacaoFields();
+    selectedResetCultural = false;
+    updateResetCulturalToggle();
     document.getElementById("endOptions").classList.remove("visible");
     document.querySelector("input[name=endType][value=never]").checked = true;
     document.getElementById("freqHint").textContent = freqHints["unica"];
@@ -1454,6 +1595,7 @@ document.getElementById("actionForm").addEventListener("submit", (e)=>{
     canais: selectedCategoria === "Comunicação" ? selectedCanais.slice() : null,
     data: dataInicioVal,
     dataFim: dataFimVal,
+    resetCultural: selectedResetCultural,
     frequencia: document.getElementById("fFrequencia").value,
     endType: endTypeEl ? endTypeEl.value : "never",
     endDate: document.getElementById("fEndDate").value || null,
