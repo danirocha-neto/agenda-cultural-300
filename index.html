@@ -465,6 +465,12 @@
       </div>
 
       <div class="form-group">
+        <label>Data de término (opcional)</label>
+        <input type="date" id="fDataFim">
+        <div class="hint">Deixe em branco se a ação for de um único dia. Se preencher, a ação aparece em cada dia do período com o sufixo "1/N, 2/N..." no título.</div>
+      </div>
+
+      <div class="form-group">
         <label>Tipo de ação</label>
         <div class="pill-select" id="categoriaSelect"></div>
       </div>
@@ -630,8 +636,15 @@ function quarterMonths(q){ return [q*3, q*3+1, q*3+2]; }
 function escapeHtml(str){ const d = document.createElement("div"); d.textContent = str || ""; return d.innerHTML; }
 
 /* =====================================================================
-   MOTOR DE RECORRÊNCIA
+   MOTOR DE RECORRÊNCIA (com suporte a ações de múltiplos dias)
 ===================================================================== */
+function calcDuracaoDias(action){
+  if(!action.dataFim) return 1;
+  const d1 = parseISO(action.data), d2 = parseISO(action.dataFim);
+  const diff = Math.round((d2 - d1) / 86400000) + 1;
+  return diff > 0 ? diff : 1;
+}
+
 function getOccurrences(action, rangeStart, rangeEnd){
   const results = [];
   const start = parseISO(action.data);
@@ -639,9 +652,22 @@ function getOccurrences(action, rangeStart, rangeEnd){
   const endType = action.endType || "never";
   const endDateObj = action.endDate ? parseISO(action.endDate) : null;
   const endCount = action.endCount ? parseInt(action.endCount) : null;
+  const totalDays = calcDuracaoDias(action);
+
+  function expandAnchor(anchorDate){
+    const spans = [];
+    for(let i=0; i<totalDays; i++){
+      const d = new Date(anchorDate);
+      d.setDate(anchorDate.getDate() + i);
+      spans.push({date:d, dayIndex:i+1, totalDays});
+    }
+    return spans;
+  }
 
   if(action.frequencia === "unica"){
-    if(start >= rangeStart && start <= rangeEnd) results.push(start);
+    expandAnchor(start).forEach(s=>{
+      if(s.date >= rangeStart && s.date <= rangeEnd) results.push(s);
+    });
     return results;
   }
 
@@ -665,10 +691,18 @@ function getOccurrences(action, rangeStart, rangeEnd){
     if(occDate > rangeEnd) break;
     if(endType === "date" && occDate > endDateObj) break;
     if(endType === "count" && count >= endCount) break;
-    if(occDate >= rangeStart && occDate <= rangeEnd) results.push(occDate);
+
+    expandAnchor(occDate).forEach(s=>{
+      if(s.date >= rangeStart && s.date <= rangeEnd) results.push(s);
+    });
+
     count++; iter++;
   }
   return results;
+}
+
+function actionDisplayTitle(action, dayIndex, totalDays){
+  return (totalDays && totalDays > 1) ? `${action.titulo} ${dayIndex}/${totalDays}` : action.titulo;
 }
 
 function getPrincipios(action){
@@ -682,7 +716,7 @@ function getAllOccurrencesInRange(rangeStart, rangeEnd, filterCategoria){
   Object.entries(actions).forEach(([id, a])=>{
     if(filterCategoria && filterCategoria!=="todos" && a.categoria !== filterCategoria) return;
     const occs = getOccurrences(a, rangeStart, rangeEnd);
-    occs.forEach(d => out.push({id, action:a, date:d}));
+    occs.forEach(o => out.push({id, action:a, date:o.date, dayIndex:o.dayIndex, totalDays:o.totalDays}));
   });
   out.sort((x,y)=> x.date - y.date);
   return out;
@@ -826,8 +860,8 @@ function buildMonthGrid(year, month, opts){
       const color = CATEGORIA_COLOR[o.action.categoria] || "var(--resultado)";
       chip.style.borderLeftColor = color;
       chip.style.background = color + "1f";
-      chip.textContent = o.action.titulo;
-      chip.onclick = ()=> openViewModal(o.id, o.date);
+      chip.textContent = actionDisplayTitle(o.action, o.dayIndex, o.totalDays);
+      chip.onclick = ()=> openViewModal(o.id, o.date, o.dayIndex, o.totalDays);
       evWrap.appendChild(chip);
     });
     if(dayOccs.length > maxShow){
@@ -898,8 +932,8 @@ function buildWeekGrid(anchor){
       const color = CATEGORIA_COLOR[o.action.categoria] || "var(--resultado)";
       chip.style.borderLeftColor = color;
       chip.style.background = color + "1f";
-      chip.textContent = o.action.titulo;
-      chip.onclick = ()=> openViewModal(o.id, o.date);
+      chip.textContent = actionDisplayTitle(o.action, o.dayIndex, o.totalDays);
+      chip.onclick = ()=> openViewModal(o.id, o.date, o.dayIndex, o.totalDays);
       evWrap.appendChild(chip);
     });
     cell.appendChild(evWrap);
@@ -999,13 +1033,13 @@ function renderActionsList(){
       items.forEach(o=>{
         const item = document.createElement("div");
         item.className = "qt-item";
-        item.onclick = ()=> openViewModal(o.id, o.date);
+        item.onclick = ()=> openViewModal(o.id, o.date, o.dayIndex, o.totalDays);
         const dot = document.createElement("div");
         dot.className = "qt-dot";
         dot.style.background = CATEGORIA_COLOR[o.action.categoria] || "var(--resultado)";
         const copy = document.createElement("div");
         copy.className = "qt-item-copy";
-        copy.innerHTML = `<div class="qt-date">${fmtBR(o.date)} · ${escapeHtml(o.action.responsavel||"")}</div><div class="qt-title">${escapeHtml(o.action.titulo)}</div>`;
+        copy.innerHTML = `<div class="qt-date">${fmtBR(o.date)} · ${escapeHtml(o.action.responsavel||"")}</div><div class="qt-title">${escapeHtml(actionDisplayTitle(o.action, o.dayIndex, o.totalDays))}</div>`;
         item.appendChild(dot); item.appendChild(copy);
         col.appendChild(item);
       });
@@ -1094,18 +1128,25 @@ document.getElementById("btnHoje").onclick = ()=>{
 /* =====================================================================
    MODAL: VISUALIZAR
 ===================================================================== */
-function openViewModal(id, occDate){
+function openViewModal(id, occDate, dayIndex, totalDays){
   const a = actions[id];
   if(!a) return;
   currentViewedId = id;
   currentViewedDate = occDate;
 
-  document.getElementById("vTitle").textContent = a.titulo;
+  document.getElementById("vTitle").textContent = actionDisplayTitle(a, dayIndex, totalDays);
   document.getElementById("vDescricao").textContent = a.descricao || "—";
   document.getElementById("vObjetivo").textContent = a.objetivo || "—";
   document.getElementById("vResponsavel").textContent = a.responsavel || "—";
   document.getElementById("vRecorrencia").textContent = FREQ_LABEL[a.frequencia] || "—";
-  document.getElementById("vData").textContent = occDate ? fmtBR(occDate) : fmtBR(parseISO(a.data));
+
+  const dataRef = occDate || parseISO(a.data);
+  if(totalDays && totalDays > 1){
+    document.getElementById("vData").textContent =
+      `${fmtBR(dataRef)} — dia ${dayIndex} de ${totalDays} (período: ${fmtBR(parseISO(a.data))} a ${fmtBR(parseISO(a.dataFim))})`;
+  }else{
+    document.getElementById("vData").textContent = fmtBR(dataRef);
+  }
 
   const badgeRow = document.getElementById("vBadgeRow");
   badgeRow.innerHTML = "";
@@ -1329,6 +1370,7 @@ function openFormModal(id, presetDateISO){
     document.getElementById("fObjetivo").value = a.objetivo || "";
     document.getElementById("fResponsavel").value = a.responsavel || "";
     document.getElementById("fData").value = a.data || "";
+    document.getElementById("fDataFim").value = a.dataFim || "";
     document.getElementById("fFrequencia").value = a.frequencia || "unica";
 
     selectedCategoria = a.categoria || "Ritual";
@@ -1351,6 +1393,7 @@ function openFormModal(id, presetDateISO){
     document.getElementById("actionForm").reset();
     document.getElementById("fId").value = "";
     document.getElementById("fData").value = presetDateISO || toISO(new Date());
+    document.getElementById("fDataFim").value = "";
     document.getElementById("fFrequencia").value = "unica";
     selectedCategoria = "Ritual";
     updateCategoriaSelector();
@@ -1393,6 +1436,13 @@ document.getElementById("actionForm").addEventListener("submit", (e)=>{
     }
   }
 
+  const dataInicioVal = document.getElementById("fData").value;
+  const dataFimVal = document.getElementById("fDataFim").value || null;
+  if(dataFimVal && dataFimVal < dataInicioVal){
+    alert("A data de término não pode ser anterior à data de início.");
+    return;
+  }
+
   const payload = {
     titulo: document.getElementById("fTitulo").value.trim(),
     descricao: document.getElementById("fDescricao").value.trim(),
@@ -1402,7 +1452,8 @@ document.getElementById("actionForm").addEventListener("submit", (e)=>{
     principios: selectedPrincipios.slice(),
     linhaEditorial: selectedCategoria === "Comunicação" ? selectedLinhaEditorial : null,
     canais: selectedCategoria === "Comunicação" ? selectedCanais.slice() : null,
-    data: document.getElementById("fData").value,
+    data: dataInicioVal,
+    dataFim: dataFimVal,
     frequencia: document.getElementById("fFrequencia").value,
     endType: endTypeEl ? endTypeEl.value : "never",
     endDate: document.getElementById("fEndDate").value || null,
