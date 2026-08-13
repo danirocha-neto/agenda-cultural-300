@@ -184,6 +184,7 @@
   .day-cell.outside{opacity:.32;}
   .day-cell.today{border-color:var(--red);}
   .day-cell.drag-over{border-color:var(--red); background:rgba(230,48,39,.12);}
+  .day-cell.picker-selected{border-color:var(--red); background:rgba(230,48,39,.22);}
   .evt-chip.dragging{opacity:.35;}
   .day-cell:hover .add-day-btn{opacity:1;}
   .day-num{font-size:14px; font-weight:600; color:var(--text-1);}
@@ -417,6 +418,7 @@
       <button class="btn btn-danger btn-sm" id="btnDeleteAction">Excluir ação</button>
       <div class="modal-footer-right">
         <button class="btn btn-ghost btn-sm" data-close="viewModal">Fechar</button>
+        <button class="btn btn-ghost btn-sm" id="btnDuplicateAction">Duplicar</button>
         <button class="btn btn-primary btn-sm" id="btnEditAction">Editar</button>
       </div>
     </div>
@@ -432,6 +434,42 @@
     </div>
     <div class="hint" style="margin-bottom:14px;">Registro de criações, edições e exclusões de ações neste calendário.</div>
     <div id="historyList"></div>
+  </div>
+</div>
+
+<!-- MODAL: duplicar ação -->
+<div class="modal-overlay hidden" id="duplicateModal">
+  <div class="modal">
+    <div class="modal-head">
+      <div class="modal-title">Duplicar Ação</div>
+      <button class="modal-close" data-close="duplicateModal">✕</button>
+    </div>
+    <div class="hint" style="margin-bottom:14px;">Selecione uma ou mais datas. Uma cópia completa da ação (com todas as informações e tags) será criada em cada data escolhida, pronta para você editar depois.</div>
+
+    <div class="cal-controls" style="margin-bottom:10px;">
+      <div class="nav-cluster">
+        <div class="month-label" id="dupMonthLabel" style="font-size:18px;">—</div>
+        <div class="nav-controls">
+          <button class="nav-btn" id="dupPrev">‹</button>
+          <button class="nav-btn" id="dupNext">›</button>
+        </div>
+      </div>
+    </div>
+
+    <div id="dupCalendarArea"></div>
+
+    <div class="form-group" style="margin-top:16px;">
+      <label>Datas selecionadas</label>
+      <div class="pill-select" id="dupSelectedList"></div>
+    </div>
+
+    <div class="modal-footer">
+      <div></div>
+      <div class="modal-footer-right">
+        <button type="button" class="btn btn-ghost btn-sm" data-close="duplicateModal">Cancelar</button>
+        <button type="button" class="btn btn-primary btn-sm" id="btnConfirmDuplicate">Duplicar</button>
+      </div>
+    </div>
   </div>
 </div>
 
@@ -1298,6 +1336,153 @@ document.getElementById("btnDeleteAction").onclick = ()=>{
     deleteAction(currentViewedId);
     document.getElementById("viewModal").classList.add("hidden");
   }
+};
+document.getElementById("btnDuplicateAction").onclick = ()=>{
+  document.getElementById("viewModal").classList.add("hidden");
+  openDuplicateModal(currentViewedId);
+};
+
+/* =====================================================================
+   DUPLICAR AÇÃO (seleção de datas em mini-calendário)
+===================================================================== */
+let duplicateSourceId = null;
+let duplicateSelectedDates = new Set();
+let dupPickerYear = new Date().getFullYear();
+let dupPickerMonth = new Date().getMonth();
+
+function openDuplicateModal(id){
+  duplicateSourceId = id;
+  duplicateSelectedDates = new Set();
+  const now = new Date();
+  dupPickerYear = now.getFullYear();
+  dupPickerMonth = now.getMonth();
+  renderDuplicatePicker();
+  document.getElementById("duplicateModal").classList.remove("hidden");
+}
+
+function renderDuplicatePicker(){
+  document.getElementById("dupMonthLabel").textContent = `${MESES[dupPickerMonth]} ${dupPickerYear}`;
+  const container = document.getElementById("dupCalendarArea");
+  container.innerHTML = "";
+  container.appendChild(buildPickerGrid(dupPickerYear, dupPickerMonth));
+  renderDupSelectedList();
+}
+
+function buildPickerGrid(year, month){
+  const wrap = document.createElement("div");
+  const weekdayRow = document.createElement("div");
+  weekdayRow.className = "weekday-row";
+  ["Dom","Seg","Ter","Qua","Qui","Sex","Sáb"].forEach(d=>{
+    const el = document.createElement("div"); el.textContent = d; weekdayRow.appendChild(el);
+  });
+  wrap.appendChild(weekdayRow);
+
+  const grid = document.createElement("div");
+  grid.className = "cal-grid";
+
+  const firstOfMonth = new Date(year, month, 1);
+  const gridStart = startOfWeek(firstOfMonth);
+  const lastOfMonth = new Date(year, month+1, 0);
+  const gridEnd = endOfWeek(lastOfMonth);
+  const todayISO = toISO(new Date());
+
+  let cursor = new Date(gridStart);
+  while(cursor <= gridEnd){
+    const iso = toISO(cursor);
+    const isOutside = cursor.getMonth() !== month;
+    const isToday = iso === todayISO;
+    const isSelected = duplicateSelectedDates.has(iso);
+
+    const cell = document.createElement("div");
+    cell.className = "day-cell compact" + (isOutside ? " outside":"") + (isToday ? " today":"") + (isSelected ? " picker-selected":"");
+    cell.style.cursor = "pointer";
+    cell.style.alignItems = "center";
+    cell.style.justifyContent = "center";
+
+    const num = document.createElement("div");
+    num.className = "day-num";
+    num.textContent = cursor.getDate();
+    cell.appendChild(num);
+
+    cell.onclick = ()=>{
+      if(duplicateSelectedDates.has(iso)) duplicateSelectedDates.delete(iso);
+      else duplicateSelectedDates.add(iso);
+      renderDuplicatePicker();
+    };
+
+    grid.appendChild(cell);
+    cursor.setDate(cursor.getDate()+1);
+  }
+  wrap.appendChild(grid);
+  return wrap;
+}
+
+function renderDupSelectedList(){
+  const wrap = document.getElementById("dupSelectedList");
+  wrap.innerHTML = "";
+  const dates = [...duplicateSelectedDates].sort();
+  if(dates.length === 0){
+    const empty = document.createElement("div");
+    empty.className = "hint";
+    empty.textContent = "Nenhuma data selecionada ainda — clique nos dias do calendário acima.";
+    wrap.appendChild(empty);
+    return;
+  }
+  dates.forEach(iso=>{
+    const chip = document.createElement("div");
+    chip.className = "pill-opt selected";
+    chip.style.background = "var(--red)";
+    chip.style.borderColor = "var(--red)";
+    chip.style.color = "#fff";
+    chip.textContent = fmtBR(parseISO(iso)) + "  ✕";
+    chip.onclick = ()=>{ duplicateSelectedDates.delete(iso); renderDuplicatePicker(); };
+    wrap.appendChild(chip);
+  });
+}
+
+document.getElementById("dupPrev").onclick = ()=>{
+  const d = new Date(dupPickerYear, dupPickerMonth, 1);
+  d.setMonth(d.getMonth()-1);
+  dupPickerYear = d.getFullYear(); dupPickerMonth = d.getMonth();
+  renderDuplicatePicker();
+};
+document.getElementById("dupNext").onclick = ()=>{
+  const d = new Date(dupPickerYear, dupPickerMonth, 1);
+  d.setMonth(d.getMonth()+1);
+  dupPickerYear = d.getFullYear(); dupPickerMonth = d.getMonth();
+  renderDuplicatePicker();
+};
+
+document.getElementById("btnConfirmDuplicate").onclick = ()=>{
+  if(!duplicateSourceId) return;
+  const src = actions[duplicateSourceId];
+  if(!src){ alert("Ação original não encontrada."); return; }
+  if(duplicateSelectedDates.size === 0){ alert("Selecione ao menos uma data."); return; }
+
+  duplicateSelectedDates.forEach(iso=>{
+    const payload = {
+      titulo: src.titulo,
+      descricao: src.descricao || "",
+      objetivo: src.objetivo || "",
+      responsavel: src.responsavel || "",
+      categoria: src.categoria,
+      principios: getPrincipios(src).slice(),
+      linhaEditorial: src.linhaEditorial || null,
+      canais: Array.isArray(src.canais) ? src.canais.slice() : null,
+      resetCultural: !!src.resetCultural,
+      data: iso,
+      dataFim: null,
+      frequencia: "unica",
+      endType: "never",
+      endDate: null,
+      endCount: null,
+      createdAt: Date.now(),
+      updatedAt: Date.now()
+    };
+    createAction(payload);
+  });
+
+  document.getElementById("duplicateModal").classList.add("hidden");
 };
 
 /* =====================================================================
